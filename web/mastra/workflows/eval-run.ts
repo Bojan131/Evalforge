@@ -27,6 +27,7 @@ import {
 } from '@/lib/types/eval';
 import { callDeepEval } from '../tools/call-deepeval';
 import { callPyService } from '../tools/call-py-services';
+import { buildRoundReport } from '@/lib/report';
 
 // ----- runtime input -----
 
@@ -65,6 +66,8 @@ export async function runEval(input: RunEvalInput, sink: RunSink): Promise<RunSt
     spent_usd: 0,
     clusters: [],
     patches: [],
+    reports: [],
+    input_cases: input.cases,
   };
   sink(state);
 
@@ -93,12 +96,22 @@ export async function runEval(input: RunEvalInput, sink: RunSink): Promise<RunSt
     return finalizeError(state, sink, `Baseline scoring failed: ${msg(e)}`);
   }
 
+  // Persist the baseline as Round 0 report — every UI report comparison
+  // is anchored against this.
+  const baselineReport = buildRoundReport({
+    round: 0,
+    label: 'Round 0 — baseline',
+    results: baselineResults,
+    clusters: [],
+    patchApplied: null,
+  });
   state = {
     ...state,
     current_round: 1,
     initial_score: baselineResults.overall_score,
     current_score: baselineResults.overall_score,
     results: baselineResults,
+    reports: [...state.reports, baselineReport],
     updated_at: new Date().toISOString(),
   };
   sink(state);
@@ -243,12 +256,23 @@ export async function runEval(input: RunEvalInput, sink: RunSink): Promise<RunSt
       currentSystemPrompt = patchedSystemPrompt;
       lastTestScore = newTestScore;
       consecutiveNoLift = 0;
+
+      // Persist this round's full report — the UI reads RunState.reports
+      // to render the desci-dkg-style per-round comparison.
+      const acceptedReport = buildRoundReport({
+        round: state.current_round,
+        label: `Round ${state.current_round} — patch accepted (lift +${(lift * 100).toFixed(1)}pp)`,
+        results: patchedResults,
+        clusters,
+        patchApplied: patch,
+      });
       state = {
         ...state,
         current_score: patchedResults.overall_score,
         results: patchedResults,
         current_round: state.current_round + 1,
         patches: [...state.patches, patch],
+        reports: [...state.reports, acceptedReport],
         updated_at: new Date().toISOString(),
       };
     } else {
@@ -258,9 +282,19 @@ export async function runEval(input: RunEvalInput, sink: RunSink): Promise<RunSt
           ? `${regressions.length} previously-passing cases now fail`
           : `No lift on test set (${(lift * 100).toFixed(1)}pp)`;
       consecutiveNoLift++;
+      // Persist a "rejected" report too — customers want to see WHY a
+      // patch was rejected. The full failure data is the audit trail.
+      const rejectedReport = buildRoundReport({
+        round: state.current_round,
+        label: `Round ${state.current_round} — patch REJECTED (${patch.reject_reason})`,
+        results: patchedResults,
+        clusters,
+        patchApplied: patch,
+      });
       state = {
         ...state,
         patches: [...state.patches, patch],
+        reports: [...state.reports, rejectedReport],
         current_round: state.current_round + 1,
         updated_at: new Date().toISOString(),
       };

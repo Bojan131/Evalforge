@@ -22,13 +22,14 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
 from app.types import (
     CaseResult,
     EvalCase,
+    GapAnalysis,
     Rubric,
     ScoreBatchRequest,
     ScoreBatchResponse,
@@ -113,51 +114,53 @@ async def _call_sut(client: httpx.AsyncClient, sut: SutConfig, question: str) ->
 # ---------- DeepEval per-case ----------
 
 
-async def _score_case(case: EvalCase, actual: str, rubric: Rubric) -> CaseResult:
+# Criteria text per metric — these are the rubrics the GEval judge sees.
+# Phrased to match the RAGAS / desci-dkg semantics customers expect.
+_METRIC_CRITERIA = {
+    "context_precision": (
+        "Of the provided context, how much is actually relevant to the question? "
+        "Penalize noise / irrelevant chunks. Match RAGAS Context Precision."
+    ),
+    "context_recall": (
+        "Did the provided context cover EVERY fact needed to produce the expected "
+        "answer? Penalize gaps. Match RAGAS Context Recall."
+    ),
+    "context_relevancy": (
+        "How useful is the retrieved context to the user's question? "
+        "Match RAGAS Context Relevancy."
+    ),
+    "answer_relevance": (
+        "Does the actual output ACTUALLY ANSWER the question? Off-topic or evasive "
+        "answers score low even if factually true. Match RAGAS Answer Relevance."
+    ),
+    "answer_correctness": (
+        "Is the actual output FACTUALLY correct vs the expected output? Penalize "
+        "wrong facts heavily. Reward each correct fact. Headline metric — match "
+        "RAGAS / desci-dkg Answer Correctness."
+    ),
+    "answer_similarity": (
+        "How semantically similar is the actual output to the expected? Two answers "
+        "can both be correct; we want the one closer in meaning. RAGAS Answer Similarity."
+    ),
+    "faithfulness": (
+        "Is every claim in the actual output supported by the provided context (if "
+        "any) or by the expected output? Penalize hallucinations heavily. RAGAS Faithfulness."
+    ),
+}
+
+
+async def _score_case(case: EvalCase, actual: str, rubric: Rubric, response_time_s: float = 0.0) -> CaseResult:
+    """Full RAGAS-style scoring — up to 7 metrics, configurable per rubric.
+
+    Mirrors the desci-dkg eval framework. The composite "Correctness Score"
+    is the weighted mean of ACTIVE metrics (weight > 0). After scoring a
+    failing case we run a second judge pass to produce the structured gap
+    analysis — exactly what feeds into the desci-dkg "WHAT NEEDS TO REACH
+    100%" block and into our patch proposer downstream.
+    """
     from deepeval.test_case import LLMTestCase  # type: ignore
 
     make_metric, _judge_model = _judge()
-
-    # Each metric is one criterion. We weight them per the rubric and average.
-    metrics = {
-        "correctness": (
-            make_metric(
-                "correctness",
-                "Determine if the actual output is FACTUALLY correct given the expected output. "
-                "Penalize wrong facts. Reward correct facts.",
-                rubric.correctness_weight,
-            ),
-            rubric.correctness_weight,
-        ),
-        "completeness": (
-            make_metric(
-                "completeness",
-                "Does the actual output cover ALL key points from the expected output? "
-                "Penalize missing information. Reward complete coverage.",
-                rubric.completeness_weight,
-            ),
-            rubric.completeness_weight,
-        ),
-        "hallucination": (
-            make_metric(
-                "hallucination",
-                "Does the actual output INVENT facts not supported by the expected output or context? "
-                "A high score means LOW hallucination. Penalize fabricated facts heavily.",
-                rubric.hallucination_weight,
-            ),
-            rubric.hallucination_weight,
-        ),
-        "format": (
-            make_metric(
-                "format",
-                "Does the actual output match the format/structure of the expected output? "
-                "(JSON shape, list vs prose, length norms.)",
-                rubric.format_weight,
-            ),
-            rubric.format_weight,
-        ),
-    }
-
     test_case = LLMTestCase(
         input=case.question,
         actual_output=actual,
@@ -166,39 +169,119 @@ async def _score_case(case: EvalCase, actual: str, rubric: Rubric) -> CaseResult
     )
 
     sub_scores: dict[str, float] = {}
+    metric_passed: dict[str, bool] = {}
     reasoning_parts: list[str] = []
     weight_sum = 0.0
     weighted_total = 0.0
 
-    for name, (metric, w) in metrics.items():
-        if w <= 0:
+    for name, weight, threshold in rubric.active_metrics:
+        # Skip context_* metrics if no context was supplied — they'd score 0
+        # mechanically and pull the composite down for non-RAG SUTs.
+        if name.startswith("context_") and not case.context:
             continue
+        criterion = _METRIC_CRITERIA[name]
+        metric = make_metric(name, criterion, weight)
         try:
             await metric.a_measure(test_case)
             score = float(metric.score or 0.0)
             sub_scores[name] = score
-            weighted_total += score * w
-            weight_sum += w
+            metric_passed[name] = score >= threshold
+            weighted_total += score * weight
+            weight_sum += weight
             if metric.reason:
                 reasoning_parts.append(f"[{name}] {metric.reason}")
-        except Exception as e:  # one bad metric shouldn't kill the batch
+        except Exception as e:
             sub_scores[name] = 0.0
+            metric_passed[name] = False
             reasoning_parts.append(f"[{name}] judge error: {e}")
 
     composite = (weighted_total / weight_sum) if weight_sum > 0 else 0.0
+
+    # Gap analysis only when below perfect — saves judge tokens.
+    gap_analysis: Optional[GapAnalysis] = None
+    if composite < 1.0:
+        try:
+            gap_analysis = await _generate_gap_analysis(case, actual, composite)
+        except Exception:
+            pass
+
     return CaseResult(
         case_id=case.id,
         actual=actual,
         score=composite,
-        passed=composite >= rubric.threshold,
+        passed=composite >= rubric.pass_threshold,
         sub_scores=sub_scores,
+        sub_passed=metric_passed,
         judge_reasoning="\n".join(reasoning_parts),
+        response_time_seconds=response_time_s,
+        gap_analysis=gap_analysis,
     )
+
+
+async def _generate_gap_analysis(case: EvalCase, actual: str, score: float) -> GapAnalysis:
+    """Run a focused judge pass that produces the desci-dkg-style diagnostic
+    block: what triples / knowledge / data points / key terms are missing,
+    and what would the projected score be if they were addressed.
+
+    This is what feeds the patch proposer downstream — concrete deltas, not
+    vibes. Patches target named gaps; reports show named gaps.
+    """
+    from openai import OpenAI
+
+    client = OpenAI()
+    judge_model = os.getenv("JUDGE_MODEL", "gpt-4o")
+
+    prompt = f"""You are a strict evaluator producing a structured "what needs to reach 100%" diagnostic.
+
+Question: {case.question}
+
+Expected answer: {case.expected}
+
+Actual answer: {actual}
+
+Current score: {round(score * 100)}%
+
+Identify what's missing in the actual answer compared to the expected. Be specific and actionable.
+Return JSON in EXACTLY this shape (no markdown):
+
+{{
+  "missing_triples": ["<subject-predicate-object facts the actual answer omitted>"],
+  "missing_knowledge": ["<concepts/topics from expected that aren't in actual>"],
+  "missing_data_points": ["<specific numbers, dates, names, identifiers omitted>"],
+  "missing_key_terms": ["<technical terms from expected not used in actual>"],
+  "score_gap_reason": "<one sentence explaining the score gap>",
+  "projected_score": <float 0..1 — score if every missing item were added>
+}}
+
+Empty arrays are valid if nothing is missing in that category. Keep each list item ≤ 80 chars."""
+
+    resp = client.chat.completions.create(
+        model=judge_model,
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+        temperature=0.1,
+    )
+    raw = resp.choices[0].message.content or "{}"
+    import json
+
+    try:
+        d = json.loads(raw)
+        return GapAnalysis(
+            missing_triples=[str(x)[:120] for x in d.get("missing_triples", [])][:10],
+            missing_knowledge=[str(x)[:120] for x in d.get("missing_knowledge", [])][:10],
+            missing_data_points=[str(x)[:120] for x in d.get("missing_data_points", [])][:10],
+            missing_key_terms=[str(x)[:120] for x in d.get("missing_key_terms", [])][:15],
+            score_gap_reason=str(d.get("score_gap_reason", ""))[:300],
+            projected_score=float(d.get("projected_score", score)),
+        )
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return GapAnalysis(score_gap_reason="Gap analysis parse failed", projected_score=score)
 
 
 async def _score_one_with_sut(
     client: httpx.AsyncClient, case: EvalCase, sut: SutConfig, rubric: Rubric
 ) -> CaseResult:
+    sut_started = time.time()
     try:
         actual = await _call_sut(client, sut, case.question)
     except Exception as e:
@@ -209,10 +292,12 @@ async def _score_one_with_sut(
             passed=False,
             sub_scores={},
             judge_reasoning="",
+            response_time_seconds=round(time.time() - sut_started, 2),
             error=str(e),
         )
+    sut_elapsed = round(time.time() - sut_started, 2)
     try:
-        return await _score_case(case, actual, rubric)
+        return await _score_case(case, actual, rubric, response_time_s=sut_elapsed)
     except Exception as e:
         return CaseResult(
             case_id=case.id,
@@ -221,6 +306,7 @@ async def _score_one_with_sut(
             passed=False,
             sub_scores={},
             judge_reasoning="",
+            response_time_seconds=sut_elapsed,
             error=f"judge failed: {e}",
         )
 

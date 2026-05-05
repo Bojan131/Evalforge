@@ -3,8 +3,9 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { use } from 'react';
-import { ArrowLeft, Loader2, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { ArrowLeft, Loader2, AlertCircle, CheckCircle2, FileText } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+// Button is used via Link → keep import
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { ScoreChip } from '@/components/ui/score-chip';
 import { pct } from '@/lib/utils';
@@ -61,7 +62,11 @@ export default function RunPage({ params }: { params: Promise<{ id: string }> })
           <h1 className="font-medium tracking-tight">
             <span className="font-mono text-xs text-text-tertiary">{id}</span>
           </h1>
-          <div className="w-16" />
+          <Link href={`/runs/${id}/reports`}>
+            <Button variant="outline" size="sm">
+              <FileText className="h-3.5 w-3.5" /> Reports
+            </Button>
+          </Link>
         </div>
       </header>
 

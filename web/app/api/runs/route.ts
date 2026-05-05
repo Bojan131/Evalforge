@@ -67,6 +67,8 @@ export async function POST(req: Request) {
     spent_usd: 0,
     clusters: [],
     patches: [],
+    reports: [],
+    input_cases: body.cases,
   };
   runStore.set(initial);
 

@@ -48,13 +48,46 @@ export type SutConfig = z.infer<typeof SutConfig>;
 
 // ---------- Rubric ----------
 
+/**
+ * Full RAGAS rubric — same 7 metrics the desci-dkg evals use.
+ *
+ *   Context metrics (only meaningful when `context` is supplied):
+ *     context_precision / context_recall / context_relevancy
+ *   Answer metrics (always run):
+ *     answer_relevance / answer_correctness / answer_similarity / faithfulness
+ *
+ * Mirror of `deepeval-svc/app/types.py::Rubric`. Keep in sync.
+ */
 export const Rubric = z.object({
-  correctness_weight: z.number().min(0).max(1).default(0.5),
-  completeness_weight: z.number().min(0).max(1).default(0.2),
-  hallucination_weight: z.number().min(0).max(1).default(0.2),
-  format_weight: z.number().min(0).max(1).default(0.1),
-  threshold: z.number().min(0).max(1).default(0.7),
+  context_precision_weight: z.number().min(0).max(1).default(0),
+  context_recall_weight: z.number().min(0).max(1).default(0),
+  context_relevancy_weight: z.number().min(0).max(1).default(0),
+  answer_relevance_weight: z.number().min(0).max(1).default(0.25),
+  answer_correctness_weight: z.number().min(0).max(1).default(0.25),
+  answer_similarity_weight: z.number().min(0).max(1).default(0.25),
+  faithfulness_weight: z.number().min(0).max(1).default(0.25),
+
+  context_precision_threshold: z.number().min(0).max(1).default(0.8),
+  context_recall_threshold: z.number().min(0).max(1).default(0.8),
+  context_relevancy_threshold: z.number().min(0).max(1).default(0.8),
+  answer_relevance_threshold: z.number().min(0).max(1).default(0.8),
+  answer_correctness_threshold: z.number().min(0).max(1).default(0.8),
+  answer_similarity_threshold: z.number().min(0).max(1).default(0.8),
+  faithfulness_threshold: z.number().min(0).max(1).default(0.7),
+
+  pass_threshold: z.number().min(0).max(1).default(0.7),
 });
+
+/** Display order + labels for the 7 RAGAS metrics — matches desci-dkg. */
+export const RAGAS_METRIC_DISPLAY: { key: string; label: string; emoji: string; isContext: boolean }[] = [
+  { key: 'context_precision',  label: 'Context Precision',  emoji: '🎯', isContext: true },
+  { key: 'context_recall',     label: 'Context Recall',     emoji: '🎯', isContext: true },
+  { key: 'context_relevancy',  label: 'Context Relevancy',  emoji: '🎯', isContext: true },
+  { key: 'answer_relevance',   label: 'Answer Relevance',   emoji: '💬', isContext: false },
+  { key: 'answer_correctness', label: 'Answer Correctness', emoji: '✅', isContext: false },
+  { key: 'answer_similarity',  label: 'Answer Similarity',  emoji: '🔄', isContext: false },
+  { key: 'faithfulness',       label: 'Faithfulness',       emoji: '🔒', isContext: false },
+];
 export type Rubric = z.infer<typeof Rubric>;
 
 // ---------- Requests / responses ----------
@@ -68,14 +101,32 @@ export const ScoreBatchRequest = z.object({
 });
 export type ScoreBatchRequest = z.infer<typeof ScoreBatchRequest>;
 
+/**
+ * Diagnostic block — mirrors the desci-dkg "WHAT NEEDS TO REACH 100%"
+ * section. Generated alongside scoring (one extra judge call per failing
+ * case). Feeds the patch proposer with structured, actionable gaps.
+ */
+export const GapAnalysis = z.object({
+  missing_triples: z.array(z.string()).default([]),
+  missing_knowledge: z.array(z.string()).default([]),
+  missing_data_points: z.array(z.string()).default([]),
+  missing_key_terms: z.array(z.string()).default([]),
+  score_gap_reason: z.string().default(''),
+  projected_score: z.number().min(0).max(1).default(0),
+});
+export type GapAnalysis = z.infer<typeof GapAnalysis>;
+
 export const CaseResult = z.object({
   case_id: z.string(),
   actual: z.string(),
   score: z.number().min(0).max(1),
   passed: z.boolean(),
   sub_scores: z.record(z.number()).default({}),
+  sub_passed: z.record(z.boolean()).default({}),
   judge_reasoning: z.string(),
+  response_time_seconds: z.number().min(0).default(0),
   error: z.string().nullable().optional(),
+  gap_analysis: GapAnalysis.nullable().optional(),
 });
 export type CaseResult = z.infer<typeof CaseResult>;
 
@@ -128,6 +179,21 @@ export const Cluster = z.object({
 });
 export type Cluster = z.infer<typeof Cluster>;
 
+/**
+ * One snapshot of the run at a given round. The reports view in the UI
+ * scrolls through these like the desci-dkg comparison reports do —
+ * round 0 vs round 1 vs round 2 — so customers can see the trajectory.
+ */
+export const RoundReport = z.object({
+  round: z.number().int().min(0),
+  label: z.string(), // e.g. "Round 0 — baseline" / "Round 1 — patch A applied"
+  results: ScoreBatchResponse,
+  clusters: z.array(Cluster).default([]),
+  patch_applied: Patch.nullable().optional(),
+  generated_at: z.string(),
+});
+export type RoundReport = z.infer<typeof RoundReport>;
+
 export const RunState = z.object({
   run_id: z.string(),
   status: RunStatus,
@@ -142,6 +208,10 @@ export const RunState = z.object({
   results: ScoreBatchResponse.optional(),
   clusters: z.array(Cluster).default([]),
   patches: z.array(Patch).default([]),
+  reports: z.array(RoundReport).default([]),
+  /** The original eval cases (question + expected). Stored on the run so
+   *  reports can render full text without re-fetching from a DB. */
+  input_cases: z.array(EvalCase).default([]),
   error: z.string().nullable().optional(),
 });
 export type RunState = z.infer<typeof RunState>;
