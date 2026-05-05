@@ -4,60 +4,84 @@ Honest build plan. What's done, what's next, what's NOT in scope.
 
 ---
 
-## Week 1 — Foundation (this commit)
+## Status: weeks 1-3 wired end-to-end
 
-✅ **Done:**
-- Repo scaffolded (`web/` Next.js + Mastra, `deepeval-svc/` Python sidecar)
-- Design system ported from SentinelQA (warm-dark Linear skin, Instrument Serif headings, Inter body, the same component primitives)
-- Eval submission form: 20+ rows of `{question, expected, context, weight, category}` with CSV import
-- DeepEval Python sidecar with `POST /score` endpoint — rubric-based GEval judge (correctness/completeness/hallucination/format)
-- Mastra workflow skeleton (`evalRun`) with one live step (`score`) and four typed-but-stubbed steps
-- Results page showing per-question scores + overall %
-- API route `/api/runs` that triggers the workflow
+This is the "you can fire it up and watch the loop run" milestone. All four
+phases of the closed-loop pipeline have working implementations. They're not
+production-tuned, but they execute and produce real output.
 
-🟡 **Stubbed but typed (so weeks 2-4 slot in cleanly):**
-- Failure clustering step — returns dummy clusters
-- Patch proposer step — returns "no-op" patch
-- Re-score + regression guard — calls score again with same input
-- Loop controller — single round only
+### ✅ Done (current commit)
+
+**Foundation**
+- Next.js 15 dashboard (landing, eval form, runs list, results detail, settings)
+- Design system ported from SentinelQA — warm-dark Linear skin, Instrument
+  Serif headings, Inter body, JetBrains Mono. Score-chip token ramp.
+- Component primitives: Button, Card, Input, Textarea, ScoreChip
+- Zod types in `web/lib/types/eval.ts` mirror Python's pydantic types 1:1
+- TypeScript strict mode passes (`pnpm typecheck`)
+- Next.js production build passes (`pnpm build`) — all 8 routes compile
+
+**DeepEval scoring** (week 1, real)
+- FastAPI sidecar with `/health`, `/score`, `/score/single`
+- DeepEval GEval rubric judge — correctness, completeness, hallucination, format
+- Parallel SUT calls bounded by `max_concurrency`
+- Tolerant SUT response parser (OpenAI shape + 5 fallbacks + str() last resort)
+
+**Failure clustering** (week 2, real)
+- `/cluster` endpoint
+- OpenAI text-embedding-3-large per failed (input, expected, actual, reasoning)
+- Cosine-normalized → HDBSCAN with EOM cluster selection
+- Noise points bucketed into a fallback cluster (never dropped)
+- Each cluster summarized by an LLM with strict JSON output: `{label, summary}`
+
+**Auto-fix optimizer** (week 3, real)
+- `/optimize` endpoint
+- DSPy `BootstrapFewShot` for round 1 (cheap, high-ROI)
+- DSPy `MIPROv2` for round 2+ (instructions + few-shots, more expensive)
+- Naive LLM proposer as universal fallback (works even if DSPy import fails)
+- Strict additive patches — never overwrites the customer's system prompt
+- Output Patch: `{ prompt_diff, few_shots[], expected_lift }`
+
+**Closed loop orchestration** (week 4 partial, real)
+- `web/mastra/workflows/eval-run.ts` plain-TS pipeline
+- Score → cluster → propose → re-score → regression-guard → loop
+- **Train/test split** built in (default 70/30, deterministic)
+- **Regression guard** — patch rejected if any previously-passing case fails
+- **Stop conditions** — goal score / 5 rounds / 3 rejected patches in a row / budget cap
+- Streaming sink callback so UI sees state updates per step
+- Patch audit trail per round: `{ round, prompt_diff, few_shots, applied, accepted, reject_reason, test_score_before, test_score_after }`
+
+### 🟡 Stubbed / coming next
+
+- **Spend tracking** — pipeline tracks `spent_usd: 0` but doesn't yet wire to
+  actual judge + optimizer cost telemetry. Patch in week 4.5.
+- **System-prompt injection mechanism** — currently sends the patched prompt
+  via an `X-EvalForge-System-Prompt` header. Most SUTs will ignore that.
+  Real implementation should send it as a `system` message in the OpenAI
+  payload. Trivial fix; doing it next.
+- **Synthetic eval expansion** (anti-overfit) — DeepEval's `Synthesizer`
+  isn't wired in yet. Week 4 adds it before the train/test split.
+- **Multi-judge consensus** — single rubric judge for now. Add when we have
+  customer accuracy complaints.
 
 ---
 
-## Week 2 — Failure analysis
+## Week 4 — Polish + UX
 
-- [ ] Embed every failed `(question, expected, actual)` triple via OpenAI `text-embedding-3-large`
-- [ ] HDBSCAN cluster on embeddings (Python sidecar with `POST /cluster`)
-- [ ] LLM-summarize each cluster with a strict rubric: "What pattern of input causes failure here?"
-- [ ] Cluster results displayed in dashboard with sample cases per cluster
-- [ ] Train/dev/test split on user's eval set (60/20/20) — built into `/api/runs`
+- [ ] Wire spent_usd to real cost (count judge + DSPy LM calls, multiply by
+  per-million pricing for the configured model)
+- [ ] Send patched prompt as a system message, not a header. Inject correctly.
+- [ ] DeepEval Synthesizer to expand 20→60 cases (paraphrases, edge cases)
+  before optimization, score on original 20
+- [ ] Round-by-round timeline UI on `/runs/:id` — every patch attempt with
+  before/after diff side-by-side, accept/reject reason
+- [ ] CSV export of full audit trail
+- [ ] "Test against my AI" button on the form (uses `/score/single`) so
+  customers can sanity-check connectivity
 
-**Acceptance:** Submit 30 questions where 10 fail on dates and 5 fail on rate-limit edge cases. Cluster output shows 2 distinct clusters with correct summaries.
-
----
-
-## Week 3 — Auto-fix optimizer
-
-- [ ] DSPy Python sidecar service (`POST /optimize`)
-- [ ] BootstrapFewShot integration first (highest ROI, ~1 day to wire)
-- [ ] MIPROv2 integration second (multi-instruction proposal)
-- [ ] Patch diff format: `{ promptDiff: string, fewShotsAdded: Example[], modelHint?: string }`
-- [ ] Mastra agent `patchProposer` that calls DSPy with the failure clusters as input
-- [ ] Cost cap per run (default $5, user-configurable up to $50)
-
-**Acceptance:** A real eval set scoring 60% on customer's AI lifts to 80%+ after one round, dev set holds.
-
----
-
-## Week 4 — Closed loop + UX polish
-
-- [ ] Apply patch step (`POST /score` again with the patched prompt as system instruction)
-- [ ] Regression guard: reject if ANY previously-passing case now fails
-- [ ] Loop controller: stop at ≥95% test score, OR 5 rounds without lift, OR budget cap
-- [ ] Audit log per run: every patch attempt with diff + lift + accept/reject reason
-- [ ] Dashboard: round-by-round timeline, before/after diff view (side-by-side), per-cluster lift breakdown
-- [ ] CSV export of full audit trail (compliance-friendly)
-
-**Acceptance:** End-to-end demo: paste a customer endpoint, submit 25 questions, walk away, return to a 60→95% trajectory with 4 rounds of patches in the audit log.
+**Acceptance:** End-to-end demo — paste OpenAI endpoint, submit 25
+questions, walk away, return to a 60→95% trajectory with 4 rounds of patches
+in the audit log.
 
 ---
 
@@ -74,26 +98,39 @@ Honest build plan. What's done, what's next, what's NOT in scope.
 
 ## Out of scope (intentional)
 
-- ❌ **Fine-tuning model weights.** Prompts + few-shots + retrieval config only. Reversible, safe, model-agnostic.
+- ❌ **Fine-tuning model weights.** Prompts + few-shots + retrieval config only.
 - ❌ **Building our own metrics.** DeepEval has 50+. We extend, never reinvent.
-- ❌ **Replacing observability tools.** We integrate with Braintrust/Langfuse/Phoenix if customer uses one. We don't compete.
-- ❌ **AFlow / agentic-workflow optimization.** Future v2 differentiator if customers ask for it. Not in MVP.
-- ❌ **Multi-judge consensus (CourtEval).** Single rubric judge for MVP. Add when accuracy demands it.
+- ❌ **Replacing observability tools.** We integrate with Braintrust/Langfuse/Phoenix
+  if a customer uses one. We don't compete.
+- ❌ **AFlow / agentic-workflow optimization.** v2 differentiator.
+- ❌ **Multi-judge CourtEval.** Add when accuracy demands it.
 
 ---
 
-## What's the moat
+## How to run
 
-1. **Closed loop.** Every competitor stops at score. We finish the job.
-2. **Failure clustering with diagnosis.** Nobody does this well today.
-3. **Regression-guarded auto-fix.** The hard problem is "improve without breaking". Most academic papers ignore it; we make it the default.
-4. **Audit trail per change.** "Round 3 added 2 few-shot examples about date handling. Lift: +6pp on test set." Compliance loves this.
+```bash
+# Terminal A — Python sidecar
+cd deepeval-svc
+source .venv/bin/activate
+export OPENAI_API_KEY=sk-...        # judge model auth
+export JUDGE_MODEL=gpt-4o
+uvicorn app.main:app --reload --port 8787
+
+# Terminal B — Next.js + Mastra
+cd web
+cp ../.env.example .env.local       # fill OPENAI_API_KEY here too
+pnpm dev
+```
+
+Open `http://localhost:3000` → "Start a new eval run" → paste your AI's
+chat-completions endpoint URL + key + 3-30 questions → watch the loop run.
 
 ---
 
-## Anti-goals (things we'd refuse to ship even if asked)
+## Anti-goals (refuse to ship even if asked)
 
 - Auto-deploying patches to production without human approval
 - Sharing one customer's eval set with another customer's optimizer
-- Allowing a customer's prompt to leak into our model's training data
+- Allowing a customer's prompt to leak into our training data
 - Calling a customer's AI without a clear cost cap

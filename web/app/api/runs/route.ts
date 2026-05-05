@@ -2,12 +2,11 @@
  * POST /api/runs — kick off an eval run.
  * GET  /api/runs — list past runs (in-memory for now).
  *
- * Run lifecycle:
- *   1. Client posts cases + SUT config + run goals.
- *   2. We start the Mastra workflow asynchronously.
- *   3. Return run_id immediately so the UI can navigate to /runs/:id and
- *      poll for state. (We don't block; eval batches can take 30-90s.)
- *   4. Workflow updates runStore as it completes each step.
+ * Lifecycle:
+ *   1. Client submits cases + SUT config + run goals.
+ *   2. We start the eval pipeline asynchronously (fire-and-forget).
+ *   3. Pipeline calls `sink(state)` after each step → we persist to runStore.
+ *   4. UI polls /api/runs/:id every 1.5s.
  *
  * Production hardening (week 5): persist to Postgres, queue via PgBoss/Inngest,
  * SSE stream for live updates instead of polling.
@@ -15,7 +14,7 @@
 
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { mastra } from '@/mastra';
+import { runEval } from '@/mastra';
 import { runStore } from '@/lib/run-store';
 import { EvalCase, RunState, SutConfig, Rubric } from '@/lib/types/eval';
 import { probeDeepEvalHealth } from '@/mastra/tools/call-deepeval';
@@ -27,11 +26,13 @@ const StartRunBody = z.object({
   rubric: Rubric.optional(),
   goal_score: z.number().min(0).max(1).default(0.95),
   budget_cap_usd: z.number().min(0).max(50).default(5),
+  test_split: z.number().min(0.1).max(0.5).default(0.3),
+  max_rounds: z.number().int().min(1).max(10).default(5),
 });
 
 export async function POST(req: Request) {
   // Fail fast if the Python sidecar is down — saves the user from filling
-  // out 30 questions only to hit a "connect refused" later.
+  // out 30 questions only to hit a connection refused later.
   const health = await probeDeepEvalHealth();
   if (!health.ok) {
     return NextResponse.json(
@@ -69,9 +70,20 @@ export async function POST(req: Request) {
   };
   runStore.set(initial);
 
-  // Fire-and-forget the workflow. The handler updates runStore as it
-  // completes steps. We return run_id immediately.
-  void runWorkflow(runId, body).catch((err) => {
+  // Fire-and-forget — pipeline updates the store as it goes.
+  void runEval(
+    {
+      run_id: runId,
+      cases: body.cases,
+      sut: body.sut,
+      rubric: body.rubric,
+      goal_score: body.goal_score,
+      budget_cap_usd: body.budget_cap_usd,
+      max_rounds: body.max_rounds,
+      test_split: body.test_split,
+    },
+    (state) => runStore.set(state)
+  ).catch((err) => {
     runStore.set({
       ...initial,
       status: 'failed',
@@ -85,23 +97,4 @@ export async function POST(req: Request) {
 
 export async function GET() {
   return NextResponse.json({ runs: runStore.list() });
-}
-
-async function runWorkflow(runId: string, body: z.infer<typeof StartRunBody>) {
-  const wf = mastra.getWorkflow('evalRunWorkflow');
-  const result = await wf.execute({
-    run_id: runId,
-    cases: body.cases,
-    sut: body.sut,
-    rubric: body.rubric,
-    goal_score: body.goal_score,
-    budget_cap_usd: body.budget_cap_usd,
-  });
-  // Final state lands in result.state per the workflow's outputSchema.
-  if (result?.state) {
-    runStore.set({
-      ...result.state,
-      status: result.state.status === 'done' ? 'done' : result.state.status,
-    });
-  }
 }

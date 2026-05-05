@@ -27,6 +27,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.score import score_batch, score_one
+from app.cluster import ClusterRequest, ClusterResponse, cluster_failures
+from app.optimize import OptimizeRequest, OptimizeResponse, optimize
 from app.types import (
     HealthResponse,
     ScoreBatchRequest,
@@ -92,3 +94,32 @@ async def score_single(req: ScoreSingleRequest) -> ScoreSingleResponse:
         return await score_one(req)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/cluster", response_model=ClusterResponse)
+async def cluster(req: ClusterRequest) -> ClusterResponse:
+    """
+    Cluster a set of failed cases by embedding similarity, then ask the
+    judge model to name each cluster's pattern. Returns clusters with
+    case_id lists so the orchestrator can route patches to specific clusters.
+    """
+    try:
+        return await cluster_failures(req)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"clustering failed: {e}") from e
+
+
+@app.post("/optimize", response_model=OptimizeResponse)
+async def optimize_endpoint(req: OptimizeRequest) -> OptimizeResponse:
+    """
+    Run the auto-fix optimizer (DSPy BootstrapFewShot / MIPROv2 / GEPA, or
+    a naive LLM fallback). Returns a Patch — system-prompt addendum + few-
+    shot examples — that targets the named cluster's failure pattern.
+
+    This endpoint is the heart of the "auto-fix" loop. Cost: 5-100 LM calls
+    depending on `method`. Caller should set a budget cap.
+    """
+    try:
+        return await optimize(req)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"optimization failed: {e}") from e
