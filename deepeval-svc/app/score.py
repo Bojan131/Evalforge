@@ -77,9 +77,15 @@ async def _call_sut(client: httpx.AsyncClient, sut: SutConfig, question: str) ->
     if sut.api_key:
         headers["Authorization"] = f"Bearer {sut.api_key}"
 
-    payload: dict[str, Any] = {
-        "messages": [{"role": "user", "content": question}],
-    }
+    # Build the messages array. If we have a system_prompt (from the closed-
+    # loop optimizer's patch), it MUST go as a real system message — not a
+    # header — because that's the only way the SUT will actually attend to it.
+    messages: list[dict[str, str]] = []
+    if sut.system_prompt:
+        messages.append({"role": "system", "content": sut.system_prompt})
+    messages.append({"role": "user", "content": question})
+
+    payload: dict[str, Any] = {"messages": messages}
     if sut.model:
         payload["model"] = sut.model
 

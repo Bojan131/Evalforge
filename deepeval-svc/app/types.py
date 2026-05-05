@@ -44,6 +44,15 @@ class SutConfig(BaseModel):
     model: Optional[str] = None
     timeout_seconds: int = Field(default=60, ge=1, le=300)
     extra_headers: dict[str, str] = Field(default_factory=dict)
+    system_prompt: Optional[str] = Field(
+        default=None,
+        description=(
+            "System message prepended to every question. Used by the closed-loop "
+            "optimizer to inject patched instructions + few-shot examples. The "
+            "customer's original system prompt (if any) lives upstream of us; we "
+            "only add to it via this field."
+        ),
+    )
 
 
 # ---------- Rubric (judge config) ----------

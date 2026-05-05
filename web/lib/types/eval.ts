@@ -37,6 +37,12 @@ export const SutConfig = z.object({
   model: z.string().optional(),
   timeout_seconds: z.number().int().min(1).max(300).default(60),
   extra_headers: z.record(z.string()).default({}),
+  /**
+   * System message prepended to every question. Used by the closed-loop
+   * optimizer to inject patched instructions + few-shot examples. Stays
+   * in sync with `deepeval-svc/app/types.py::SutConfig.system_prompt`.
+   */
+  system_prompt: z.string().optional(),
 });
 export type SutConfig = z.infer<typeof SutConfig>;
 

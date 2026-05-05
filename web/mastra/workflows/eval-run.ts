@@ -197,13 +197,12 @@ export async function runEval(input: RunEvalInput, sink: RunSink): Promise<RunSt
           cases: input.cases,
           sut: {
             ...input.sut,
-            // Inject the patched prompt as a system message via extra_headers
-            // is not portable — instead we prepend it to each question. This
-            // works for any OpenAI-compatible SUT without schema changes.
-            extra_headers: {
-              ...input.sut.extra_headers,
-              'X-EvalForge-System-Prompt': encodeURIComponent(patchedSystemPrompt).slice(0, 8000),
-            },
+            // The patched prompt rides as a real `system` message inside the
+            // chat-completions payload. The Python sidecar's _call_sut reads
+            // SutConfig.system_prompt and prepends it to messages[]. This is
+            // the ONLY way the SUT will actually attend to the patch; the
+            // earlier header-based attempt didn't reach the model.
+            system_prompt: patchedSystemPrompt,
           },
           rubric: input.rubric,
           max_concurrency: 8,
