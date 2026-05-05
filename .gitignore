@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+**/.venv/
+__pycache__/
+*.pyc
+*.pyo
+.eggs/
+*.egg-info/
+.pytest_cache/
+
+# Env
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Build
+.next/
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Local databases
+*.db
+*.sqlite
+memory.db
+
+# Generated
+.turbo/
+coverage/
