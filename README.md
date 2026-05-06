@@ -123,7 +123,3 @@ Open `http://localhost:3000` and submit your first eval set.
 5. **The customer's AI stays a black box.** They paste an OpenAI-compatible endpoint URL + key; we call it, we never see weights.
 
 ---
-
-## License
-
-Proprietary. (Will reconsider as we approach launch.)
